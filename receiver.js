@@ -1,29 +1,30 @@
 /**
- * GlowJack — Chromecast Custom Receiver for GrooveGlow
+ * PetPulse — Chromecast Custom Receiver
  *
- * Receives AudioFeatures from the Android sender app via a custom Cast
- * messaging namespace, then renders visualizations on the TV using
- * HTML5 Canvas.
+ * Receives AudioFeatures + pet image from the Android sender app via Cast
+ * messaging, then renders music-reactive visualizations on the TV.
  *
  * Protocol:
- *   Namespace: urn:x-cast:com.grooveglow.viz
+ *   Namespace: urn:x-cast:com.petpulse.viz
  *   Messages (JSON):
  *     { type: "features", data: { energyLow, energyMid, energyHigh, ... } }
  *     { type: "vizIndex", index: 0 }
+ *     { type: "petImage", dataUrl: "data:image/png;base64,..." }
+ *     { type: "palette", colors: ["#FFAB40", "#FF6E40", ...] }
  *     { type: "ping" }  →  { type: "pong" }
  *
- * Visualizers implemented:
+ * Visualizers:
  *   0: Nebula Swarm (particles)
  *   1: Bass Tunnel (expanding waveform rings)
  *   2: Ribbon Flow (flowing ribbons)
  *   3: Pulse Grid (grid of pulsing dots)
- *   4+ : Fallback to Nebula Swarm
+ *   4: Pet Glow (pet silhouette with music-reactive glow — requires petImage)
  */
 
-const NAMESPACE = 'urn:x-cast:com.grooveglow.viz';
+const NAMESPACE = 'urn:x-cast:com.petpulse.viz';
 
 // ===== State =====
-let canvas, ctx;
+let canvas, ctx, petCanvas, petCtx;
 let width = 1920, height = 1080;
 let activeVizIndex = 0;
 let features = {
@@ -39,20 +40,24 @@ let connected = false;
 let lastFeatureTime = 0;
 let time = 0;
 
+// Pet image state
+let petImage = null;
+let petLoaded = false;
+let paletteColors = ['#FFAB40', '#FF6E40', '#FF4081', '#00E5FF', '#76FF03', '#E040FB'];
+
 // ===== Cast Receiver Setup =====
 function initCastReceiver() {
   const context = cast.framework.CastReceiverContext.getInstance();
   const options = new cast.framework.CastReceiverOptions();
-  options.disableIdleTimeout = true; // Keep receiver alive
+  options.disableIdleTimeout = true;
 
-  // Listen for custom messages
   context.addCustomMessageListener(NAMESPACE, (event) => {
     handleMessage(event.data);
   });
 
   context.addEventListener(
     cast.framework.system.EventType.SENDER_CONNECTED, () => {
-      console.log('[GlowJack] Sender connected');
+      console.log('[PetPulse] Sender connected');
       connected = true;
       document.getElementById('status').classList.add('hidden');
     }
@@ -60,21 +65,18 @@ function initCastReceiver() {
 
   context.addEventListener(
     cast.framework.system.EventType.SENDER_DISCONNECTED, () => {
-      console.log('[GlowJack] Sender disconnected');
+      console.log('[PetPulse] Sender disconnected');
       connected = false;
       document.getElementById('status').classList.remove('hidden');
 
-      // Shut down after 30s without sender
       setTimeout(() => {
-        if (!connected) {
-          context.stop();
-        }
+        if (!connected) context.stop();
       }, 30000);
     }
   );
 
   context.start(options);
-  console.log('[GlowJack] Receiver started, waiting for sender...');
+  console.log('[PetPulse] Receiver started, waiting for sender...');
 }
 
 function handleMessage(data) {
@@ -89,14 +91,36 @@ function handleMessage(data) {
       break;
     case 'vizIndex':
       activeVizIndex = data.index || 0;
-      console.log('[GlowJack] Viz index:', activeVizIndex);
+      console.log('[PetPulse] Viz index:', activeVizIndex);
+      break;
+    case 'petImage':
+      loadPetImage(data.dataUrl);
+      break;
+    case 'palette':
+      if (data.colors && data.colors.length > 0) {
+        paletteColors = data.colors;
+        console.log('[PetPulse] Palette updated:', paletteColors.length, 'colors');
+      }
       break;
     case 'ping':
-      // Respond with pong (latency check)
-      const ctx = cast.framework.CastReceiverContext.getInstance();
-      ctx.sendCustomMessage(NAMESPACE, undefined, { type: 'pong' });
+      const castCtx = cast.framework.CastReceiverContext.getInstance();
+      castCtx.sendCustomMessage(NAMESPACE, undefined, { type: 'pong' });
       break;
   }
+}
+
+function loadPetImage(dataUrl) {
+  if (!dataUrl) return;
+  const img = new Image();
+  img.onload = () => {
+    petImage = img;
+    petLoaded = true;
+    console.log('[PetPulse] Pet image loaded:', img.width, 'x', img.height);
+  };
+  img.onerror = () => {
+    console.warn('[PetPulse] Failed to load pet image');
+  };
+  img.src = dataUrl;
 }
 
 function updateFeatures(f) {
@@ -121,6 +145,8 @@ function updateFeatures(f) {
 function initCanvas() {
   canvas = document.getElementById('viz');
   ctx = canvas.getContext('2d');
+  petCanvas = document.getElementById('pet-canvas');
+  petCtx = petCanvas.getContext('2d');
   resize();
   window.addEventListener('resize', resize);
 }
@@ -130,6 +156,18 @@ function resize() {
   height = window.innerHeight;
   canvas.width = width;
   canvas.height = height;
+  petCanvas.width = width;
+  petCanvas.height = height;
+}
+
+// ===== Palette Helper =====
+function palColor(index, alpha) {
+  const hex = paletteColors[index % paletteColors.length];
+  if (alpha === undefined) return hex;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${Math.min(alpha, 1)})`;
 }
 
 // ===== Nebula Swarm Visualizer =====
@@ -144,64 +182,54 @@ function initNebula() {
       vx: (Math.random() - 0.5) * 2,
       vy: (Math.random() - 0.5) * 2,
       size: 2 + Math.random() * 4,
-      hue: Math.random() * 360,
+      colorIdx: Math.floor(Math.random() * 6),
       life: Math.random()
     });
   }
 }
 
 function drawNebula() {
-  const { energyLow, energyHigh, beatPulse, amplitude, brightness } = features;
+  const { energyLow, energyHigh, beatPulse, amplitude } = features;
   const cx = width / 2, cy = height / 2;
 
   for (const p of nebulaParticles) {
-    // Attract to center with bass
     const dx = cx - p.x, dy = cy - p.y;
     const dist = Math.sqrt(dx * dx + dy * dy) + 1;
     const attract = 0.5 + energyLow * 3;
     p.vx += (dx / dist) * attract * 0.01;
     p.vy += (dy / dist) * attract * 0.01;
 
-    // Repel on beat
     if (features.isBeat) {
       const repel = 3 + beatPulse * 8;
       p.vx -= (dx / dist) * repel;
       p.vy -= (dy / dist) * repel;
     }
 
-    // Swirl
     p.vx += (-dy / dist) * 0.3;
     p.vy += (dx / dist) * 0.3;
-
-    // Damping
     p.vx *= 0.97;
     p.vy *= 0.97;
-
     p.x += p.vx;
     p.y += p.vy;
 
-    // Wrap
     if (p.x < 0) p.x += width;
     if (p.x > width) p.x -= width;
     if (p.y < 0) p.y += height;
     if (p.y > height) p.y -= height;
 
-    // Color cycling
-    p.hue = (p.hue + 0.5 + energyHigh * 2) % 360;
-    const sat = 70 + brightness * 30;
+    p.colorIdx = (p.colorIdx + 0.01) % paletteColors.length;
     const alpha = 0.3 + amplitude * 0.5 + beatPulse * 0.2;
     const size = p.size * (1 + beatPulse * 2);
 
     ctx.beginPath();
     ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${p.hue}, ${sat}%, 60%, ${Math.min(alpha, 1)})`;
+    ctx.fillStyle = palColor(Math.floor(p.colorIdx), alpha);
     ctx.fill();
 
-    // Glow
     if (size > 3) {
       ctx.beginPath();
       ctx.arc(p.x, p.y, size * 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${p.hue}, ${sat}%, 60%, ${alpha * 0.1})`;
+      ctx.fillStyle = palColor(Math.floor(p.colorIdx), alpha * 0.1);
       ctx.fill();
     }
   }
@@ -212,11 +240,10 @@ const tunnelRings = [];
 const MAX_RINGS = 30;
 
 function drawBassTunnel() {
-  const { energyLow, beatPulse, isBeat, waveform, brightness } = features;
+  const { energyLow, beatPulse, isBeat, waveform } = features;
   const cx = width / 2, cy = height / 2;
   const maxR = Math.min(width, height) * 0.45;
 
-  // Spawn rings
   const spawnRate = 0.3 + energyLow * 4;
   if (Math.random() < spawnRate * 0.016 || isBeat) {
     if (tunnelRings.length < MAX_RINGS) {
@@ -224,16 +251,14 @@ function drawBassTunnel() {
         radius: isBeat ? 8 : 3,
         thickness: isBeat ? 4 + beatPulse * 8 : 2 + energyLow * 4,
         alpha: 1,
-        hue: Math.random() * 60,
+        colorIdx: Math.floor(Math.random() * paletteColors.length),
         waveOff: Math.random(),
         waveAmp: 0.3 + features.amplitude * 1.5
       });
     }
   }
 
-  // Update and draw
   const speed = 80 + energyLow * 300;
-  const warm = brightness > 0.5;
 
   for (let i = tunnelRings.length - 1; i >= 0; i--) {
     const ring = tunnelRings[i];
@@ -245,7 +270,6 @@ function drawBassTunnel() {
       continue;
     }
 
-    const hue = warm ? ring.hue : ring.hue + 180;
     const thickness = ring.thickness * (1 + beatPulse * 2);
     const pts = 72;
 
@@ -263,15 +287,14 @@ function drawBassTunnel() {
       if (p === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.closePath();
-    ctx.strokeStyle = `hsla(${hue}, 70%, 60%, ${ring.alpha * 0.8})`;
+    ctx.strokeStyle = palColor(ring.colorIdx, ring.alpha * 0.8);
     ctx.lineWidth = thickness;
     ctx.stroke();
   }
 
-  // Center glow
   const glowA = Math.min(0.6, energyLow * 0.4 + beatPulse * 0.3);
   const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 40 + energyLow * 60);
-  grad.addColorStop(0, `hsla(${warm ? 20 : 200}, 60%, 60%, ${glowA})`);
+  grad.addColorStop(0, palColor(0, glowA));
   grad.addColorStop(1, 'transparent');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
@@ -279,12 +302,11 @@ function drawBassTunnel() {
 
 // ===== Ribbon Flow Visualizer =====
 function drawRibbonFlow() {
-  const { energyLow, energyMid, energyHigh, beatPulse, brightness, waveform } = features;
+  const { energyLow, energyMid, energyHigh, beatPulse, waveform } = features;
   const ribbonCount = 6;
 
   for (let r = 0; r < ribbonCount; r++) {
     const baseY = height * (0.15 + r * 0.12);
-    const hue = (r * 50 + time * 30) % 360;
     const alpha = 0.3 + energyMid * 0.4 + beatPulse * 0.2;
 
     ctx.beginPath();
@@ -300,7 +322,7 @@ function drawRibbonFlow() {
       const y = baseY + displacement;
       if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = `hsla(${hue}, ${60 + brightness * 30}%, 55%, ${Math.min(alpha, 0.8)})`;
+    ctx.strokeStyle = palColor(r, Math.min(alpha, 0.8));
     ctx.lineWidth = 2 + energyLow * 3 + beatPulse * 4;
     ctx.lineCap = 'round';
     ctx.stroke();
@@ -309,7 +331,7 @@ function drawRibbonFlow() {
 
 // ===== Pulse Grid Visualizer =====
 function drawPulseGrid() {
-  const { fftMagnitudes, beatPulse, energyLow, brightness } = features;
+  const { fftMagnitudes, beatPulse } = features;
   const cols = 16, rows = 10;
   const cellW = width / cols, cellH = height / rows;
 
@@ -318,26 +340,80 @@ function drawPulseGrid() {
       const cx = cellW * (gx + 0.5);
       const cy = cellH * (gy + 0.5);
 
-      // Map grid position to FFT bin
       const fftIdx = Math.floor((gx / cols) * fftMagnitudes.length);
       const energy = fftMagnitudes[fftIdx] || 0;
 
       const radius = 3 + energy * cellW * 0.4 + beatPulse * 5;
-      const hue = (gx * 20 + gy * 30 + time * 40) % 360;
+      const colorIdx = (gx + gy) % paletteColors.length;
       const alpha = 0.2 + energy * 0.6 + beatPulse * 0.2;
 
-      // Glow
       ctx.beginPath();
       ctx.arc(cx, cy, radius * 2, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${hue}, 70%, 50%, ${alpha * 0.15})`;
+      ctx.fillStyle = palColor(colorIdx, alpha * 0.15);
       ctx.fill();
 
-      // Dot
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${hue}, ${60 + brightness * 30}%, 55%, ${Math.min(alpha, 0.9)})`;
+      ctx.fillStyle = palColor(colorIdx, Math.min(alpha, 0.9));
       ctx.fill();
     }
+  }
+}
+
+// ===== Pet Glow Visualizer =====
+function drawPetGlow() {
+  if (!petLoaded || !petImage) {
+    drawNebula();
+    return;
+  }
+
+  const { energyLow, beatPulse, isBeat, amplitude } = features;
+  const cx = width / 2, cy = height / 2;
+
+  // Scale pet to fit TV
+  const maxPetW = width * 0.5;
+  const maxPetH = height * 0.7;
+  const scale = Math.min(maxPetW / petImage.width, maxPetH / petImage.height);
+  const pw = petImage.width * scale;
+  const ph = petImage.height * scale;
+
+  // Beat bounce
+  const bounce = isBeat ? beatPulse * 15 : 0;
+  const scaleP = 1 + beatPulse * 0.05;
+
+  // Draw on pet canvas layer
+  petCtx.clearRect(0, 0, width, height);
+
+  // Glow layers behind pet
+  for (let g = 3; g >= 1; g--) {
+    const glowR = pw * 0.3 * g + energyLow * 80;
+    const glowAlpha = (0.08 + beatPulse * 0.06) / g;
+    const grad = petCtx.createRadialGradient(cx, cy - bounce, pw * 0.1, cx, cy - bounce, glowR);
+    grad.addColorStop(0, palColor(g - 1, glowAlpha));
+    grad.addColorStop(1, 'transparent');
+    petCtx.fillStyle = grad;
+    petCtx.fillRect(0, 0, width, height);
+  }
+
+  // Draw pet with beat scale + bounce
+  petCtx.save();
+  petCtx.translate(cx, cy - bounce);
+  petCtx.scale(scaleP, scaleP);
+  petCtx.globalAlpha = 0.85 + amplitude * 0.15;
+  petCtx.drawImage(petImage, -pw / 2, -ph / 2, pw, ph);
+  petCtx.restore();
+
+  // Frequency bars at bottom
+  const barCount = 48;
+  const barW = width / barCount;
+  for (let i = 0; i < barCount; i++) {
+    const fftIdx = Math.floor((i / barCount) * features.fftMagnitudes.length);
+    const energy = features.fftMagnitudes[fftIdx] || 0;
+    const barH = energy * height * 0.4 + 2;
+    const colorIdx = i % paletteColors.length;
+
+    ctx.fillStyle = palColor(colorIdx, 0.3 + energy * 0.4);
+    ctx.fillRect(i * barW, height - barH, barW - 1, barH);
   }
 }
 
@@ -349,7 +425,10 @@ function render() {
   ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
   ctx.fillRect(0, 0, width, height);
 
-  // If no features received recently, decay values
+  // Clear pet overlay
+  petCtx.clearRect(0, 0, width, height);
+
+  // Decay features if no data received recently
   const timeSinceFeature = performance.now() - lastFeatureTime;
   if (timeSinceFeature > 200) {
     features.beatPulse *= 0.9;
@@ -366,7 +445,8 @@ function render() {
     case 1: drawBassTunnel(); break;
     case 2: drawRibbonFlow(); break;
     case 3: drawPulseGrid(); break;
-    default: drawNebula(); break; // Fallback for image-based modes
+    case 4: drawPetGlow(); break;
+    default: drawPetGlow(); break;
   }
 
   requestAnimationFrame(render);
